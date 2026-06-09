@@ -72,6 +72,22 @@ def _validate_content(content: str) -> None:
         raise ValueError("`text` must be a non-empty, non-whitespace string.")
 
 
+def _as_meta(value: Any) -> Dict[str, Any]:
+    """Normalize a JSONB metadata column value to a dict.
+
+    asyncpg returns JSONB as a JSON string unless a type codec is registered,
+    so a stored object comes back as text. Parse it defensively.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
 async def _pg_version(pool: asyncpg.Pool) -> str:
     row = await pool.fetchrow("SELECT version() AS v")
     return (row["v"] or "").split(" on ")[0] if row else "unknown"
@@ -137,11 +153,11 @@ async def semantic_search(
             ORDER BY e.vector <=> $1::vector
             LIMIT $3;
         """
-        rows = await conn.fetch(sql, embedding, type_filter, limit)
+        rows = await conn.fetch(sql, str(embedding), type_filter, limit)
 
     results: List[Dict[str, Any]] = []
     for row in rows:
-        meta = dict(row["metadata"] or {})
+        meta = _as_meta(row["metadata"])
         results.append({
             "id": str(row["id"]),
             "text": row["raw_text"],
@@ -203,7 +219,7 @@ async def list_recent(
 
     results: List[Dict[str, Any]] = []
     for row in rows:
-        meta = dict(row["metadata"] or {})
+        meta = _as_meta(row["metadata"])
         results.append({
             "id": str(row["id"]),
             "text": row["raw_text"],

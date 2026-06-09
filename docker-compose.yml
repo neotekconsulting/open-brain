@@ -7,6 +7,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-openbrain}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -26,21 +27,45 @@ services:
       - "${OLLAMA_PORT:-11434}:11434"
     restart: unless-stopped
 
+  # One-shot: wait for the Ollama server, then pull the models the stack needs.
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        until ollama list >/dev/null 2>&1; do
+          echo 'waiting for ollama server...'; sleep 2;
+        done;
+        echo 'pulling models...';
+        ollama pull nomic-embed-text &&
+        ollama pull llama3.2
+    restart: "no"
+
   mcp-brain:
     build:
       context: ./mcp-brain
       dockerfile: Dockerfile
+    command: ["python", "server.py", "http"]
     env_file:
       - .env
     environment:
       OLLAMA_HOST: ollama
       OLLAMA_PORT: ${OLLAMA_PORT:-11434}
+      OLLAMA_URL: http://ollama:11434
+      DATABASE_URL: postgres://${POSTGRES_USER:-openbrain}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-openbrain}
       MCP_PORT: ${MCP_PORT:-8000}
     ports:
       - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
     depends_on:
       postgres:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ingestion-api:
@@ -52,10 +77,16 @@ services:
     environment:
       OLLAMA_HOST: ollama
       OLLAMA_PORT: ${OLLAMA_PORT:-11434}
+      OLLAMA_URL: http://ollama:11434
+      DATABASE_URL: postgres://${POSTGRES_USER:-openbrain}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-openbrain}
       INGESTION_PORT: ${INGESTION_PORT:-8080}
+    ports:
+      - "${INGESTION_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

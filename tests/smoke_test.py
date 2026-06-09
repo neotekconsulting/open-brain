@@ -44,10 +44,19 @@ SMOKE_THOUGHTS = [
 ]
 
 
+def _build_database_url() -> str:
+    user = os.environ.get("POSTGRES_USER", "openbrain")
+    password = os.environ.get("POSTGRES_PASSWORD", "changeme")
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "openbrain")
+    return f"postgres://{user}:{password}@{host}:{port}/{db}"
+
+
 def _load_config() -> dict:
     return {
         "DATABASE_URL": os.environ.get(
-            "DATABASE_URL", "postgres://openbrain:changeme@localhost:5432/openbrain"
+            "DATABASE_URL", _build_database_url()
         ),
         "OLLAMA_URL": os.environ.get(
             "OLLAMA_URL", "http://localhost:11434"
@@ -120,29 +129,99 @@ def _ingest_thoughts(cfg: dict, thoughts: list[str]) -> list[dict]:
     return results
 
 
+def _parse_mcp_payload(resp: httpx.Response) -> dict:
+    """Parse an MCP streamable-HTTP response.
+
+    The transport may reply either with a plain JSON body or with an SSE stream
+    (``text/event-stream``) that carries the JSON-RPC message in ``data:`` lines.
+    """
+    ctype = resp.headers.get("content-type", "")
+    text = resp.text
+    if "text/event-stream" in ctype:
+        data_parts: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("data:"):
+                data_parts.append(stripped[len("data:"):].strip())
+        raw = "".join(data_parts).strip()
+    else:
+        raw = text.strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+async def _mcp_post(
+    client: httpx.AsyncClient,
+    base: str,
+    method: str,
+    params: dict,
+    *,
+    session_id: str | None = None,
+    request_id: int | None = None,
+) -> httpx.Response:
+    """Send one JSON-RPC message to the MCP streamable-HTTP endpoint."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if session_id:
+        headers["mcp-session-id"] = session_id
+    payload: dict = {"jsonrpc": "2.0", "method": method, "params": params}
+    if request_id is not None:
+        payload["id"] = request_id
+    return await client.post(f"{base}/mcp", json=payload, headers=headers)
+
+
 async def _call_mcp_search(cfg: dict, query: str, limit: int = 5) -> list:
     base = cfg["MCP_URL"]
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "semantic_search",
-            "arguments": {
-                "query": query,
-                "limit": limit,
-            },
-        },
-    }
-
     async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
-        r = await client.post(f"{base}/mcp", json=payload)
+        # 1) MCP handshake: initialize, then send the initialized notification.
+        init = await _mcp_post(
+            client,
+            base,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "open-brain-smoke", "version": "1.0"},
+            },
+            request_id=1,
+        )
+        try:
+            init.raise_for_status()
+        except Exception as exc:
+            _die(f"MCP initialize failed: {exc}")
+        session_id = init.headers.get("mcp-session-id")
+        await _mcp_post(
+            client,
+            base,
+            "notifications/initialized",
+            {},
+            session_id=session_id,
+        )
+
+        # 2) Invoke the semantic_search tool.
+        r = await _mcp_post(
+            client,
+            base,
+            "tools/call",
+            {
+                "name": "semantic_search",
+                "arguments": {"query": query, "limit": limit},
+            },
+            session_id=session_id,
+            request_id=2,
+        )
         try:
             r.raise_for_status()
         except Exception as exc:
             _die(f"MCP search request failed for query={query!r}: {exc}")
 
-        body = r.json()
+        body = _parse_mcp_payload(r)
         search_results: list = []
         if isinstance(body, dict):
             result_obj = body.get("result") or {}
@@ -154,6 +233,10 @@ async def _call_mcp_search(cfg: dict, query: str, limit: int = 5) -> list:
                     _die(f"Invalid search result JSON for query={query!r}: {exc}")
             elif isinstance(content, dict):
                 search_results = content.get("results") or []
+            # Fallback: some servers also return parsed data under structuredContent.
+            if not search_results and isinstance(result_obj.get("structuredContent"), dict):
+                sc = result_obj["structuredContent"]
+                search_results = sc.get("result") or sc.get("results") or []
 
         if not isinstance(search_results, list):
             _die(f"Unexpected non-list search results for query={query!r}")

@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 import logging
 from typing import Optional
@@ -128,24 +129,24 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
         thought_id = await conn.fetchval(
             """
             INSERT INTO thoughts (id, raw_text, thought_type, source, metadata, evidence_basis, visibility_verified_by_human_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz)
             RETURNING id
             """,
             uuid.UUID(captured_id),
             req.raw_text,
             metadata.get("type"),
             req.source,
-            json_metadata,
+            json.dumps(json_metadata),
             req.evidence_basis,
             req.visibility_verified_by_human_at,
         )
         await conn.execute(
             """
             INSERT INTO embeddings (thought_id, vector, model)
-            VALUES ($1, $2, $3)
+            VALUES ($1, $2::vector, $3)
             """,
             thought_id,
-            embedding,
+            str(embedding),
             EMBED_MODEL,
         )
 
