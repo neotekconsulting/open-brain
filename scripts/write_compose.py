@@ -1,4 +1,5 @@
-services:
+p = r'C:\Users\jeffj\open-brain\docker-compose.yml'
+text = """services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
@@ -19,7 +20,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     environment:
-      OLLAMA_HOST: 0.0.0.0
+      - OLLAMA_HOST=0.0.0.0
     volumes:
       - ollama:/root/.ollama
     ports:
@@ -30,11 +31,9 @@ services:
     build:
       context: ./mcp-brain
       dockerfile: Dockerfile
-    env_file:
-      - .env
     environment:
-      OLLAMA_HOST: ollama
-      OLLAMA_PORT: ${OLLAMA_PORT:-11434}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      OLLAMA_URL: http://ollama:${OLLAMA_PORT:-11434}
       MCP_PORT: ${MCP_PORT:-8000}
     ports:
       - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
@@ -47,12 +46,12 @@ services:
     build:
       context: ./ingestion-api
       dockerfile: Dockerfile
-    env_file:
-      - .env
     environment:
-      OLLAMA_HOST: ollama
-      OLLAMA_PORT: ${OLLAMA_PORT:-11434}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      OLLAMA_URL: http://ollama:${OLLAMA_PORT:-11434}
       INGESTION_PORT: ${INGESTION_PORT:-8080}
+    ports:
+      - "${INGESTION_PORT:-8080}:${INGESTION_PORT:-8080}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,3 +60,7 @@ services:
 volumes:
   pgdata:
   ollama:
+"""
+with open(p, 'w', encoding='utf-8') as f:
+    f.write(text)
+print('written')
