@@ -63,6 +63,8 @@ Docker Compose.
 - **Docker** and **Docker Compose** (version 2+ plugin).
 - **Ollama** container is provided by Compose; you do not need a host install.
 - 8 GB+ RAM recommended for `llama3.2` and `nomic-embed-text` plus Postgres.
+- To run the smoke test from your host you also need **Python 3.10+** with the
+  `asyncpg` and `httpx` packages (`pip install asyncpg httpx`).
 
 ## Environment
 
@@ -90,27 +92,86 @@ cd open-brain
 
 # optional: create/edit .env to override defaults
 
-# start the stack
+# start the stack; the first run pulls the Ollama models (nomic-embed-text and
+# llama3.2) via the one-shot `ollama-init` service, which can take several
+# minutes before the API containers start
 docker compose up -d
 
-# verify services are healthy
-curl http://localhost:8080/health
-curl http://localhost:8000/health
+# watch the model pull finish on the first run
+docker compose logs -f ollama-init
+
+# verify services are up
+docker compose ps
+curl http://localhost:8080/health   # ingestion API -> {"status": "ok"}
 ```
 
+The MCP brain server speaks streamable HTTP (JSON-RPC) at
+`http://localhost:8000/mcp`; it has no plain `GET /health` route.
+
 Stop the stack with `docker compose down`. Data persists in the `pgdata` and
-`ollama` named volumes.
+`ollama` named volumes; add `-v` (`docker compose down -v`) to wipe them — this
+is required if you change `schema.sql`, which only initializes while `pgdata`
+is empty.
 
 ## Smoke test
+
+The smoke test runs on your **host** (not in a container) and exercises the
+whole stack end to end.
+
+First, start the stack and let the models finish downloading (see Quickstart).
+Then install the host dependencies once:
+
+```bash
+pip install asyncpg httpx
+```
+
+Run the test from the repo root:
 
 ```bash
 python tests/smoke_test.py
 ```
 
-The script waits for Postgres, Ollama, the ingestion API, and the MCP server,
-inserts five built-in test thoughts, runs semantic search through the MCP HTTP
-endpoint, and asserts at least one relevant result per query under a configured
-distance threshold.
+It waits for Postgres, Ollama, the ingestion API, and the MCP server, inserts
+five built-in test thoughts via `POST /capture`, then performs an MCP
+`initialize` handshake and calls the `semantic_search` tool over streamable
+HTTP for each thought. It asserts a relevant top result per query under a
+cosine-distance threshold (default `0.75`). On success it prints
+`PASS: smoke test succeeded` and exits `0`.
+
+### Smoke test configuration
+
+All variables are optional; defaults target the Compose stack on `localhost`:
+
+- `SMOKE_INGESTION_URL` — ingestion base URL (default `http://localhost:8080`).
+- `SMOKE_MCP_URL` — MCP base URL (default `http://localhost:8000`).
+- `OLLAMA_URL` — Ollama base URL (default `http://localhost:11434`).
+- `DATABASE_URL` — full Postgres DSN, or set `POSTGRES_USER`,
+  `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, and `POSTGRES_DB` to
+  have one built automatically.
+- `--thoughts-file PATH` — optional JSON array of thought strings to use
+  instead of the built-ins.
+
+### Smoke test troubleshooting
+
+- **`/capture` returns 502 on the first run.** The Ollama models are still
+  downloading. Wait until `docker compose logs ollama-init` prints `success`,
+  then re-run the test.
+- **Ollama port `11434` is already in use.** A host Ollama is already running.
+  Publish the container's Ollama on a free port and point the test at it:
+
+  ```bash
+  OLLAMA_PORT=11435 docker compose up -d
+  OLLAMA_URL=http://localhost:11435 python tests/smoke_test.py
+  ```
+
+  PowerShell:
+
+  ```powershell
+  $env:OLLAMA_PORT='11435'; docker compose up -d
+  $env:OLLAMA_URL='http://localhost:11435'; python tests/smoke_test.py
+  ```
+- **Stale results or schema.** `schema.sql` only runs while `pgdata` is empty.
+  Reset with `docker compose down -v`, then start the stack again.
 
 ## API Docs
 
