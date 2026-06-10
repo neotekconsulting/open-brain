@@ -130,11 +130,6 @@ def _ingest_thoughts(cfg: dict, thoughts: list[str]) -> list[dict]:
 
 
 def _parse_mcp_payload(resp: httpx.Response) -> dict:
-    """Parse an MCP streamable-HTTP response.
-
-    The transport may reply either with a plain JSON body or with an SSE stream
-    (``text/event-stream``) that carries the JSON-RPC message in ``data:`` lines.
-    """
     ctype = resp.headers.get("content-type", "")
     text = resp.text
     if "text/event-stream" in ctype:
@@ -163,7 +158,6 @@ async def _mcp_post(
     session_id: str | None = None,
     request_id: int | None = None,
 ) -> httpx.Response:
-    """Send one JSON-RPC message to the MCP streamable-HTTP endpoint."""
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -179,7 +173,6 @@ async def _mcp_post(
 async def _call_mcp_search(cfg: dict, query: str, limit: int = 5) -> list:
     base = cfg["MCP_URL"]
     async with httpx.AsyncClient(timeout=httpx.Timeout(120)) as client:
-        # 1) MCP handshake: initialize, then send the initialized notification.
         init = await _mcp_post(
             client,
             base,
@@ -204,7 +197,6 @@ async def _call_mcp_search(cfg: dict, query: str, limit: int = 5) -> list:
             session_id=session_id,
         )
 
-        # 2) Invoke the semantic_search tool.
         r = await _mcp_post(
             client,
             base,
@@ -233,7 +225,6 @@ async def _call_mcp_search(cfg: dict, query: str, limit: int = 5) -> list:
                     _die(f"Invalid search result JSON for query={query!r}: {exc}")
             elif isinstance(content, dict):
                 search_results = content.get("results") or []
-            # Fallback: some servers also return parsed data under structuredContent.
             if not search_results and isinstance(result_obj.get("structuredContent"), dict):
                 sc = result_obj["structuredContent"]
                 search_results = sc.get("result") or sc.get("results") or []

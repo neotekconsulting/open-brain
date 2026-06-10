@@ -16,10 +16,28 @@ app = FastAPI(title="Open Brain Ingestion API")
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    f"postgres://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}@postgres:5432/{os.environ['POSTGRES_DB']}",
+    f"postgres://{os.environ['POSTGRES_USER']}:***@postgres:5432/{os.environ['POSTGRES_DB']}",
 )
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 INGESTION_PORT = int(os.environ.get("INGESTION_PORT", 8080))
+
+
+def _build_inline_tags(metadata: dict) -> str:
+    """Serialize metadata fields into a lightweight tag block appended to raw_text.
+
+    Example output:
+      \n#type:preferences #people:Jeff #topics:brain,testing #action:review
+    """
+    tags = []
+    if metadata.get("type"):
+        tags.append(f"#type:{metadata['type']}")
+    if metadata.get("people"):
+        tags.append(f"#people:{','.join(metadata['people'])}")
+    if metadata.get("topics"):
+        tags.append(f"#topics:{','.join(metadata['topics'])}")
+    if metadata.get("action_items"):
+        tags.append(f"#action:{','.join(metadata['action_items'])}")
+    return ("\n" + " ".join(tags)) if tags else ""
 
 EMBED_MODEL = "nomic-embed-text"
 METADATA_MODEL = "llama3.2"  # small, reasonable default for structure extraction
@@ -104,24 +122,25 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
         raise HTTPException(status_code=400, detail="raw_text must not be empty")
 
     captured_id = str(uuid.uuid4())
-    async with httpx.AsyncClient() as client:
-        # 1) Embedding
-        try:
-            embedding = await get_ollama_embedding(req.raw_text, client)
-        except Exception as exc:
-            logger.exception("Embedding failed")
-            raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}") from exc
 
-        # 2) Metadata extraction (best-effort)
+    async with httpx.AsyncClient() as client:
+        # 1) Metadata extraction (best-effort)
         metadata: dict = {}
         try:
             metadata = await extract_metadata(req.raw_text, client)
         except Exception as exc:
             logger.warning("Metadata extraction failed; continuing without metadata: %s", exc)
 
+        # 2) Embedding
+        tagged_text = req.raw_text + _build_inline_tags(metadata)
+        try:
+            embedding = await get_ollama_embedding(tagged_text, client)
+        except Exception as exc:
+            logger.exception("Embedding failed")
+            raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}") from exc
+
     # 3) Persist
     async with app.state.db_pool.acquire() as conn:
-        # Build JSON metadata without passing source twice since source lives on thoughts table
         json_metadata = {k: v for k, v in metadata.items() if k not in ("source", "raw_text")}
         if req.source:
             json_metadata["source"] = req.source
@@ -133,7 +152,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             RETURNING id
             """,
             uuid.UUID(captured_id),
-            req.raw_text,
+            tagged_text,
             metadata.get("type"),
             req.source,
             json.dumps(json_metadata),

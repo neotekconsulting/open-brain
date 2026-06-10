@@ -72,6 +72,24 @@ def _validate_content(content: str) -> None:
         raise ValueError("`text` must be a non-empty, non-whitespace string.")
 
 
+def _build_inline_tags(metadata: dict) -> str:
+    """Serialize metadata fields into a lightweight tag block appended to raw_text.
+
+    Example output:
+      \n#type:preferences #people:Jeff #topics:brain,testing #action:review
+    """
+    tags = []
+    if metadata.get("type"):
+        tags.append(f"#type:{metadata['type']}")
+    if metadata.get("people"):
+        tags.append(f"#people:{','.join(metadata['people'])}")
+    if metadata.get("topics"):
+        tags.append(f"#topics:{','.join(metadata['topics'])}")
+    if metadata.get("action_items"):
+        tags.append(f"#action:{','.join(metadata['action_items'])}")
+    return ("\n" + " ".join(tags)) if tags else ""
+
+
 def _as_meta(value: Any) -> Dict[str, Any]:
     """Normalize a JSONB metadata column value to a dict.
 
@@ -319,9 +337,8 @@ async def capture_thought(
         metadata["topics"] = list(topics)
     if action_items:
         metadata["action_items"] = list(action_items)
-    if metadata:
-        # Only include non-empty metadata
-        pass
+
+    tagged_text = text + _build_inline_tags(metadata)
 
     pool = await _get_pool()
     async with pool.acquire() as conn:
@@ -333,7 +350,7 @@ async def capture_thought(
                 VALUES ($1, $2, $3, $4::jsonb, $5)
                 RETURNING id, created_at;
                 """,
-                text,
+                tagged_text,
                 type,
                 source,
                 json.dumps(metadata) if metadata else None,
@@ -347,7 +364,7 @@ async def capture_thought(
             embedding_ok = False
             embedding_model = "nomic-embed-text"
             try:
-                vector = await _embed_one(text)
+                vector = await _embed_one(tagged_text)
                 if vector:
                     await conn.execute(
                         """
