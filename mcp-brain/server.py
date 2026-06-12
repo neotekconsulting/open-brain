@@ -331,6 +331,8 @@ async def capture_thought(
     _validate_content(text)
 
     metadata: Dict[str, Any] = {}
+    if type:
+        metadata["type"] = type
     if people:
         metadata["people"] = list(people)
     if topics:
