@@ -2,7 +2,7 @@ import os
 import json
 import uuid
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -39,6 +39,7 @@ def _build_inline_tags(metadata: dict) -> str:
         tags.append(f"#action:{','.join(metadata['action_items'])}")
     return ("\n" + " ".join(tags)) if tags else ""
 
+
 EMBED_MODEL = "nomic-embed-text"
 METADATA_MODEL = "llama3.2"  # small, reasonable default for structure extraction
 
@@ -47,8 +48,12 @@ class CaptureRequest(BaseModel):
     raw_text: str
     source: Optional[str] = None
     thought_type: Optional[str] = None
+    people: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    action_items: Optional[List[str]] = None
     visibility_verified_by_human_at: Optional[str] = None
     evidence_basis: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 class CaptureResponse(BaseModel):
@@ -58,7 +63,7 @@ class CaptureResponse(BaseModel):
 
 
 async def get_ollama_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
-    """Call Ollama embedding API. Expects 768-dim output for nomic-embed-text."""
+    """Call Ollama embedding API. Respects config-defined OLLAMA_URL/model."""
     url = f"{OLLAMA_URL}/api/embeddings"
     payload = {"model": EMBED_MODEL, "prompt": text}
     resp = await client.post(url, json=payload, timeout=120.0)
@@ -76,12 +81,12 @@ async def extract_metadata(raw_text: str, client: httpx.AsyncClient) -> dict:
         "Extract structured metadata from the following thought/diary text. "
         "Return a JSON object only, with keys: type, people (list of strings), "
         "topics (list of strings), action_items (list of strings). "
-        "If a value is unknown, use an empty list."
+        "If a value is unknown, omit it from the output. Do not insert backticks or code fences."
     )
     url = f"{OLLAMA_URL}/api/generate"
     payload = {
         "model": METADATA_MODEL,
-        "prompt": f"{system_prompt}\n\nText:\n{raw_text}\n\nJSON:",
+        "prompt": f"{system_prompt}\n\nText:\n{raw_text}\n\nJSON:\n",
         "stream": False,
         "format": "json",
     }
@@ -96,6 +101,8 @@ async def extract_metadata(raw_text: str, client: httpx.AsyncClient) -> dict:
             metadata = {}
     else:
         metadata = data or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
     metadata.setdefault("type", None)
     metadata.setdefault("people", [])
     metadata.setdefault("topics", [])
@@ -124,14 +131,25 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     captured_id = str(uuid.uuid4())
 
     async with httpx.AsyncClient() as client:
-        # 1) Metadata extraction (best-effort)
-        metadata: dict = {}
+        # 1) Metadata extraction
+        extracted: dict = {}
         try:
-            metadata = await extract_metadata(req.raw_text, client)
+            extracted = await extract_metadata(req.raw_text, client)
         except Exception as exc:
             logger.warning("Metadata extraction failed; continuing without metadata: %s", exc)
 
-        # 2) Embedding
+        # 2) Merge: caller fields take precedence, then extracted fields.
+        metadata = {
+            "type": req.thought_type or extracted.get("type"),
+            "people": req.people or extracted.get("people") or [],
+            "topics": req.topics or extracted.get("topics") or [],
+            "action_items": req.action_items or extracted.get("action_items") or [],
+        }
+        if req.metadata and isinstance(req.metadata, dict):
+            for field in ("type", "people", "topics", "action_items"):
+                if field in req.metadata and req.metadata[field] not in (None, [], ""):
+                    metadata[field] = req.metadata[field]
+
         tagged_text = req.raw_text + _build_inline_tags(metadata)
         try:
             embedding = await get_ollama_embedding(tagged_text, client)
